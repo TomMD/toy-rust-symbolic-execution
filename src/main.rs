@@ -1,7 +1,7 @@
 // use std::fs::File;
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::marker::PhantomData;
+use std::fmt;
 use std::ops;
 use z3::ast::Ast;
 use z3::ast::Int;
@@ -23,41 +23,79 @@ enum Operator {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Expr<E> {
+enum Expr {
     Const {
         arg: u64,
-        phantom: PhantomData<E>,
     },
     Negate {
-        arg: Box<Expr<E>>,
+        arg: Box<Expr>,
     },
     BinOp {
         oper: Operator,
-        arg1: Box<Expr<E>>,
-        arg2: Box<Expr<E>>,
+        arg1: Box<Expr>,
+        arg2: Box<Expr>,
     },
     Var {
         arg: String,
     },
     If {
-        discr: Box<Expr<E>>,
-        then: Box<Expr<E>>,
-        otherwise: Box<Expr<E>>,
+        discr: Box<Expr>,
+        then: Box<Expr>,
+        otherwise: Box<Expr>,
     },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Stmt<E> {
-    NetSend { arg: Box<Expr<E>> },
-    Assign { arg: String, val: Box<Expr<E>> },
-    JumpZ { arg: Box<Expr<E>>, location: usize },
-    Halt { arg: Box<Expr<E>> },
+enum Stmt {
+    NetSend { arg: Box<Expr> },
+    NetRecv { arg: String },
+    Assign { arg: String, val: Box<Expr> },
+    JumpZ { arg: Box<Expr>, location: usize },
+    Halt { arg: Box<Expr> },
 }
 
-type Program<E> = Vec<Stmt<E>>;
+type Program = Vec<Stmt>;
 
 // Not necessary, but these helpers are useful for syntactic cleanliness
-impl<E> ops::Neg for Expr<E> {
+fn netsend(e: Box<Expr>) -> Stmt {
+    Stmt::NetSend { arg: e }
+}
+
+fn netrecv(x: &str) -> Stmt {
+    Stmt::NetRecv { arg: x.to_string() }
+}
+
+fn assign(x: &str, v: Box<Expr>) -> Stmt {
+    Stmt::Assign {
+        arg: x.to_string(),
+        val: v,
+    }
+}
+
+// Hacky re-use of recv as a random (universally quantified) value
+fn rand(x: &str) -> Stmt {
+    Stmt::NetRecv { arg: x.to_string() }
+}
+
+fn jumpz(e: Box<Expr>, l: usize) -> Stmt {
+    Stmt::JumpZ {
+        arg: e,
+        location: l,
+    }
+}
+
+fn jump(l: usize) -> Stmt {
+    Stmt::JumpZ {
+        arg: con(0),
+        location: l,
+    }
+}
+
+fn halt(e: Box<Expr>) -> Stmt {
+    Stmt::Halt { arg: e }
+}
+
+impl ops::Neg for Expr {
     type Output = Self;
 
     fn neg(self) -> Self {
@@ -67,66 +105,91 @@ impl<E> ops::Neg for Expr<E> {
     }
 }
 
-impl<E> ops::Add for Expr<E> {
+impl ops::Add for Box<Expr> {
     type Output = Self;
 
     fn add(self, other: Self) -> Self {
-        Expr::BinOp {
+        Box::new(Expr::BinOp {
             oper: Operator::Add,
-            arg1: Box::new(self),
-            arg2: Box::new(other),
-        }
+            arg1: self,
+            arg2: other,
+        })
     }
 }
 
-impl<E> ops::Sub for Expr<E> {
+impl ops::Sub for Box<Expr> {
     type Output = Self;
 
     fn sub(self, other: Self) -> Self {
-        Expr::BinOp {
+        Box::new(Expr::BinOp {
             oper: Operator::Sub,
-            arg1: Box::new(self),
-            arg2: Box::new(other),
-        }
+            arg1: self,
+            arg2: other,
+        })
     }
 }
 
-impl<E> ops::Mul for Expr<E> {
+impl ops::Mul for Box<Expr> {
     type Output = Self;
 
     fn mul(self, other: Self) -> Self {
-        Expr::BinOp {
+        Box::new(Expr::BinOp {
             oper: Operator::Mul,
-            arg1: Box::new(self),
-            arg2: Box::new(other),
-        }
+            arg1: self,
+            arg2: other,
+        })
     }
 }
 
-impl<E> ops::Div for Expr<E> {
+impl ops::Div for Box<Expr> {
     type Output = Self;
 
     fn div(self, other: Self) -> Self {
-        Expr::BinOp {
+        Box::new(Expr::BinOp {
             oper: Operator::Div,
-            arg1: Box::new(self),
-            arg2: Box::new(other),
-        }
+            arg1: self,
+            arg2: other,
+        })
     }
 }
 
-fn equals<E>(a: Expr<E>, b: Expr<E>) -> Expr<E> {
-    Expr::BinOp {
+fn equals(a: Box<Expr>, b: Box<Expr>) -> Box<Expr> {
+    Box::new(Expr::BinOp {
         oper: Operator::Equal,
-        arg1: Box::new(a),
-        arg2: Box::new(b),
-    }
+        arg1: a,
+        arg2: b,
+    })
 }
 
-// Concrete intepretation of expressions
-fn interp_expr(e: Expr<u64>, env: &HashMap<String, u64>) -> u64 {
+fn con(v: u64) -> Box<Expr> {
+    Box::new(Expr::Const { arg: v })
+}
+
+fn var(s: &str) -> Box<Expr> {
+    Box::new(Expr::Var { arg: s.to_string() })
+}
+
+fn ite(discr: Box<Expr>, then: Box<Expr>, otherwise: Box<Expr>) -> Box<Expr> {
+    Box::new(Expr::If {
+        discr,
+        then,
+        otherwise,
+    })
+}
+
+fn binop(oper: Operator, arg1: Box<Expr>, arg2: Box<Expr>) -> Box<Expr> {
+    Box::new(Expr::BinOp { oper, arg1, arg2 })
+}
+
+fn negate(arg: Box<Expr>) -> Box<Expr> {
+    Box::new(Expr::Negate { arg })
+}
+
+// A typical interpreter would use concrete intepretation of expressions.
+// The interpreter below is for exemplificiation only and not the main interest.
+fn interp_expr(e: Expr, env: &HashMap<String, u64>) -> u64 {
     match e {
-        Expr::Const { arg, phantom } => arg,
+        Expr::Const { arg } => arg,
         Expr::Negate { arg } => u64::MAX - interp_expr(*arg, &env),
         Expr::BinOp { oper, arg1, arg2 } => {
             let v1 = interp_expr(*arg1, &env);
@@ -163,34 +226,36 @@ fn interp_expr(e: Expr<u64>, env: &HashMap<String, u64>) -> u64 {
     }
 }
 
-// Finally we get to the real solution using symbolic execution. Our symbolic execution system has
+// Finally we get to the real solution using symbolic execution. Our analysis system has
 // a few layers:
 // 1. Machine state which includes
 //      - a Program to execute and program counter
 //      - an environment (memory)
-//      - a solver context, and
+//      - a solver context
 //      - variables for any non-memory properties we wish to check
 // 2. A work queue of machine states so we can check more than a single trace through the program
 #[derive(Clone, Debug)]
 struct MachineState<'a> {
-    program: Program<u64>,
+    program: Program,
     pc: usize,
     env: HashMap<String, z3::ast::Int<'a>>,
     // ctx: Context,
-    solver: Solver,
+    solver: Solver<'a>,
     // Properties of interest:
     netsend_vals: VecDeque<z3::ast::Int<'a>>,
-    has_paniced: z3::ast::Int<'a>,
-    halted: bool,
+    halted: Option<z3::ast::Int<'a>>,
+    path: VecDeque<bool>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 struct WorkQueue<'a> {
     queue: VecDeque<MachineState<'a>>,
 }
 
+// Interpreting an expression can't have any side effects. There are no writes to memory, network
+// sends, etc. The only thing an expression needs is the ability to evaluate - thus, ctx and env (memory)
 fn symexec_expr<'a>(
-    e: Expr<u64>,
+    e: Expr,
     env: &HashMap<String, z3::ast::Int<'a>>,
     ctx: &'a Context,
 ) -> z3::ast::Int<'a> {
@@ -212,7 +277,7 @@ fn symexec_expr<'a>(
         }
         Expr::Var { arg } => match env.get(&arg) {
             Some(val) => val.clone(),
-            None => Int::from_u64(&ctx, 0), // A semantics choice that undefined means 0
+            None => panic!("Undefined behavior found"), // or Int::from_u64(&ctx, 0), // A semantics choice that undefined means 0
         },
         Expr::If {
             discr,
@@ -232,79 +297,158 @@ fn symexec_expr<'a>(
     }
 }
 
-// Symbolically interpreting the statements requires us to write the symbolic expressions requires:
+// Symbolically interpreting the statements requires:
 //  - Writing the symbolic value to the environment on assignment
 //  - Asserting the zero and non-zero-ness of the value for jump-on-zero
 //  - Update any flags tracking interesting facts we are proving such as halt, or sent values
-fn symexec_stmt<'a>(s: Stmt<u64>, st: MachineState<'a>, q: &mut WorkQueue<'a>) {
-    if st.halted {
+fn symexec_stmt<'a>(s: Stmt, st: &MachineState<'a>, q: &mut WorkQueue<'a>) {
+    // println!("PC: {}, Stmt: {:?}", st.pc, s);
+    // st.solver.check();
+    // let mdl = st.solver.get_model();
+    // println!("Model: {:?}", mdl);
+    if st.halted.is_none() {
         match s {
-            Stmt::NetSend { arg } => {}
+            Stmt::NetSend { arg } => {
+                let mut new_machine_state = st.clone();
+                let evaluated = symexec_expr(*arg, &st.env, st.solver.get_context());
+                new_machine_state.netsend_vals.push_back(evaluated);
+                new_machine_state.pc += 1;
+                q.queue.push_back(new_machine_state);
+            }
+            Stmt::NetRecv { arg } => {
+                let mut new_machine_state = st.clone();
+                let recved_value = Int::fresh_const(
+                    &new_machine_state.solver.get_context(),
+                    &format!("Recv@{}", new_machine_state.pc),
+                );
+                new_machine_state.env.insert(arg, recved_value.clone());
+                new_machine_state.pc += 1;
+                q.queue.push_back(new_machine_state);
+            }
             Stmt::Assign { arg, val } => {
                 let mut new_machine_state = st.clone();
-                new_machine_state.env.insert(arg, val);
-                q.push_front(new_machine_state);
+                let evaluated = symexec_expr(
+                    *val,
+                    &new_machine_state.env,
+                    new_machine_state.solver.get_context(),
+                );
+                new_machine_state.env.insert(arg, evaluated);
+                new_machine_state.pc += 1;
+                q.queue.push_back(new_machine_state);
             }
             Stmt::JumpZ { arg, location } => {
-                if let Some(exprVal) = st.env.lookup(arg) {
-                    let mut jumping_machine_state = st.clone();
-                    jumping_machine_state
-                        .solver
-                        .assert(symexec_expr(exprVal, &st.env, st.solver.get_context()) == 0);
-                    if let SatResult::Sat = jumping_machine_state.solver.check() {
-                        jumping_machine_state.pc = location;
-                        q.push_front(new_machine_state);
-                    }
+                let result = symexec_expr(*arg, &st.env, st.solver.get_context());
+                let mut jumping_machine_state = st.clone();
+                jumping_machine_state
+                    .solver
+                    .assert(&result._eq(&Int::from_u64(
+                        jumping_machine_state.solver.get_context(),
+                        0,
+                    )));
+                if let SatResult::Sat = jumping_machine_state.solver.check() {
+                    // let mdl_j = jumping_machine_state.solver.get_model();
+                    // println!("Jumping Model: {:?}", mdl_j);
+                    jumping_machine_state.pc = location;
+                    jumping_machine_state.path.push_back(true);
+                    q.queue.push_back(jumping_machine_state);
                 }
-                let non_jumping_machine_state = st.clone();
-                non_jumping_machine_state.pc = st.location + 1;
-                if let Some(exprVal) = non_jumping_machine_state.env.lookup(arg) {
-                    non_jumping_machine_state
-                        .assert(symexec_expr(exprVal, &st.env, st.solver.get_context()) != 0);
-                }
+                let mut non_jumping_machine_state = st.clone();
+                non_jumping_machine_state.pc = non_jumping_machine_state.pc + 1;
+                non_jumping_machine_state.solver.assert(
+                    &result
+                        ._eq(&Int::from_u64(
+                            non_jumping_machine_state.solver.get_context(),
+                            0,
+                        ))
+                        .not(),
+                );
                 if let SatResult::Sat = non_jumping_machine_state.solver.check() {
-                    q.push_front(new_machine_state)
+                    non_jumping_machine_state.path.push_back(false);
+                    q.queue.push_back(non_jumping_machine_state)
                 }
             }
-            Stmt::Halt => {
-                let new_machine_state = st.clone().halted = true;
-                q.push_front(new_machine_state);
+            Stmt::Halt { arg } => {
+                let mut new_machine_state = st.clone();
+                new_machine_state.halted = Some(symexec_expr(
+                    *arg,
+                    &new_machine_state.env,
+                    new_machine_state.solver.get_context(),
+                ));
+                q.queue.push_back(new_machine_state);
             }
         }
     }
 }
 
-fn main_symexec(e: Expr<u64>) {
+fn symexec_program(prog: Program) {
     let cfg = Config::new();
     let ctx = Context::new(&cfg);
-    let res = symexec_expr(e, &HashMap::new(), &ctx);
-    let solver = Solver::new(&ctx);
-    solver.check();
-    println!("{:?}", solver.get_model());
-}
-
-fn con(v: u64) -> Box<Expr<u64>> {
-    Box::new(Expr::Const {
-        arg: v,
-        phantom: PhantomData,
-    })
-}
-
-fn binop<E>(oper: Operator, arg1: Box<Expr<E>>, arg2: Box<Expr<E>>) -> Box<Expr<E>> {
-    Box::new(Expr::BinOp { oper, arg1, arg2 })
-}
-
-fn negate<E>(arg: Box<Expr<E>>) -> Box<Expr<E>> {
-    Box::new(Expr::Negate { arg })
+    let st0 = MachineState {
+        program: prog,
+        pc: 0,
+        env: HashMap::new(),
+        solver: Solver::new(&ctx),
+        netsend_vals: VecDeque::new(),
+        halted: None,
+        path: VecDeque::new(),
+    };
+    let mut q = WorkQueue {
+        queue: VecDeque::new(),
+    };
+    q.queue.push_front(st0);
+    while let Some(curr_state) = q.queue.pop_front() {
+        if let Some { .. } = curr_state.halted {
+            // The only real output of this "analysis"
+            match curr_state.solver.check() {
+                SatResult::Sat => {
+                    println!("Solution's Model:\n{:?}", curr_state.solver.get_model())
+                }
+                x => println!("{:?}", x),
+            }
+            break;
+        }
+        match curr_state.program.get(curr_state.pc) {
+            None => {
+                println!("Oh bother. We found a bad Jump or Stmts that end without Halt");
+                return;
+            }
+            Some(stmt) => {
+                symexec_stmt(stmt.clone(), &curr_state, &mut q);
+            }
+        }
+    }
 }
 
 fn main() {
-    let e = Box::new(Expr::If {
-        discr: con(0),
-        then: { con(0) },
-        otherwise: binop(Operator::Add, con(42), con(32)),
-    });
-    let e2 = e.clone();
-    println!("{:?}", interp_expr(*e, &HashMap::new()));
-    main_symexec(*e2)
+    let program = vec![
+        netrecv("must_be_non_zero"), // 0
+        assign(
+            "tested_non_zero",
+            ite(var("must_be_non_zero"), con(0), con(1)),
+        ),
+        jumpz(var("tested_non_zero"), 4), // 2
+        jump(0),                          // 3
+        rand("random"),                   // 4
+        netsend(var("random")),           // 5
+        netrecv("must_match_random_plus13_minute_non_zero"), // 6
+        jumpz(
+            var("random") + con(13)
+                - var("must_be_non_zero")
+                - var("must_match_random_plus13_minute_non_zero"),
+            9,
+        ),
+        jump(0), // 8
+        netrecv("computation of first two"), // 9
+        jumpz(
+            con(1)
+                - equals(
+                    var("computation of first two"),
+                    var("random") * var("must_be_non_zero"),
+                ),
+            12,
+        ),
+        jump(0), // 11
+        halt(con(0)),
+    ];
+    symexec_program(program);
 }
